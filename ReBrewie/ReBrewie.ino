@@ -486,9 +486,18 @@ void Brewie_Step() {
     for (uint8_t go = 0; go < 22; go++) {
       brewieStepBuffer[go] = 0;
     }
+    bool negativeField = false;
     for (uint8_t commands = 1; commands <= brewieCommand[0][0]; commands++) {
       for (uint8_t len = 0; len < brewieCommand[commands][1]; len++) {
-        brewieStepBuffer[commands-1] += brewieData[brewieCommand[commands][0]+len] - 0x30;
+        uint8_t b = brewieData[brewieCommand[commands][0]+len];
+        // Numeric P103 fields should never carry '-'. If the host planner
+        // emitted a negative (seen with unsorted hop schedules), skip the
+        // sign byte so the magnitude parses correctly, and flag P303.
+        if (b == '-') {
+          negativeField = true;
+          continue;
+        }
+        brewieStepBuffer[commands-1] += b - 0x30;
         if (brewieCommand[commands][1] - len > 1) {
           brewieStepBuffer[commands-1] *= 10;
         }
@@ -497,6 +506,9 @@ void Brewie_Step() {
     newStep = true;
     // Signal that a new step was received from the previous step request
     brewieStepRequestFlag = false;
+    if (negativeField) {
+      AddNotification("P303");
+    }
   } else {
     if (AddNotification("E300")) {
       Brewie_Pause();
