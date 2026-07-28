@@ -1,5 +1,5 @@
 #include "Brewie.h"
-#include "B20Plus.h"
+#include "HardwareConfig.h"
 
 int32_t heaterMinimumCycleTime = 2000;
 

@@ -1,4 +1,18 @@
 # ReBrewie
+
+## Hardware profiles
+
+The source supports both controller variants through
+`ReBrewie/HardwareConfig.h`:
+
+```cpp
+#define BREWIE_HARDWARE_B20 1   // B20: HX711 load cells
+// #define BREWIE_HARDWARE_B20 0 // B20+: I2C pressure sensor
+```
+
+Bring-up diagnostics and automatic power-on are disabled by default. They
+can be enabled temporarily in `ReBrewie.ino` with
+`BREWIE_DIAGNOSTICS` and `BREWIE_AUTO_POWER_ON`.
 Custom, Open-Source firmware for the Brewie B20+ (and maybe B20 eventually)
 
 # Intro
@@ -55,4 +69,3 @@ Caveat: Doing this on a B20+ requires a change in the script so that the reset p
 
 # Request for Help
 If someone has the time to try to port this over to the B20, that would be amazing. The main thing to figure out would be the pump control, since Brewie used valve controls to slow down the pump for hopping. Maybe PWM or some other sort of valve control would be suitable. The other piece would be the weight sensor, but all that would be required is to figure out where the data is and the rest should fit into the current flow.
-

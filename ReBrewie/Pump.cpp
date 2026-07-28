@@ -184,7 +184,6 @@ void Pump::setPumpSpeed(uint8_t pumpSpeed) {
   } else {
     _running = true;
     _pumpDiag = 255;
-    PORTH |= 0x80;
     digitalWrite(_pumpPin, HIGH);
     _pumpEnable = true;
     _pumpSpeedRestart = _pumpSpeed;
@@ -208,7 +207,6 @@ void Pump::_setPumpSpeed() {
   } else {
     _running = true;
     _pumpDiag = 255;
-    PORTH |= 0x80;
     digitalWrite(_pumpPin, HIGH);
     _pumpEnable = true;
   }

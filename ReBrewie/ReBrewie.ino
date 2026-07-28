@@ -8,10 +8,24 @@
 #include "Valves.h"
 #include "Pressure.h"
 #include "Notifications.h"
+#include "HX711.h"
 
 // Brewie Version setup
-#include "B20Plus.h"
-//#include "B20.h"
+#include "HardwareConfig.h"
+
+// Human-readable hardware diagnostics for bring-up.  Set to 0 for the
+// production firmware; diagnostics are deliberately not part of the normal
+// tab-separated status protocol.
+#ifndef BREWIE_DIAGNOSTICS
+#define BREWIE_DIAGNOSTICS 0
+#endif
+
+// Bring-up convenience: initialize the AVR power/sensor state at boot
+// without waiting for the host's P80 calibration command.  Set to 0 for
+// production, where the host protocol controls power-on.
+#ifndef BREWIE_AUTO_POWER_ON
+#define BREWIE_AUTO_POWER_ON 0
+#endif
 
 // Global Configurations
 uint8_t spargePumpSpeed = 100;      // Reduce sparging pumping speed
@@ -74,10 +88,10 @@ DeviceAddress chassisAddress;
 #endif
 
 // Sensor Variables
-uint8_t massAddress = 25;             // Default for my machine
-uint16_t massSensor = 0;
-int16_t massFast = 0;
-int16_t massOffset = 0;
+uint8_t massAddress = 25;             // B20+ pressure sensor address
+int32_t massSensor = 0;
+int32_t massFast = 0;
+int32_t massOffset = 0;
 bool validMass = false;
 float waterVolume = 0;
 uint16_t massTemp = 0;
@@ -116,12 +130,102 @@ volatile bool drainButton = false;
 Brewie* brewie;
 Pump* mashPump;
 Pump* boilPump;
+HX711 weightScale;
+
+#if BREWIE_DIAGNOSTICS
+void Diagnostics_Report() {
+  static uint32_t lastReport;
+  if (millis() - lastReport < 2000) {
+    return;
+  }
+  lastReport = millis();
+
+  Serial.println("!--- Brewie hardware diagnostics ---");
+  Serial.print("!powerOn=");
+  Serial.print(powerOn ? 1 : 0);
+  Serial.print(" powerButton(pin ");
+  Serial.print(POWER_BUTTON);
+  Serial.print(")=");
+  Serial.print(digitalRead(POWER_BUTTON));
+  Serial.print(" drainButton(pin ");
+  Serial.print(DRAIN_BUTTON);
+  Serial.print(")=");
+  Serial.println(digitalRead(DRAIN_BUTTON));
+
+  Serial.print("!temp mash pin=");
+  Serial.print(MASH_TEMP);
+  Serial.print(" devices=");
+  Serial.print(MashTemp ? MashTemp->getDeviceCount() : 0);
+  Serial.print(" value=");
+  Serial.print(mashTemp, 2);
+  Serial.print(" address=");
+  for (uint8_t i = 0; i < 8; i++) {
+    if (mashAddress[i] < 16) Serial.print('0');
+    Serial.print(mashAddress[i], HEX);
+  }
+  Serial.println();
+
+  Serial.print("!temp boil pin=");
+  Serial.print(BOIL_TEMP);
+  Serial.print(" devices=");
+  Serial.print(BoilTemp ? BoilTemp->getDeviceCount() : 0);
+  Serial.print(" value=");
+  Serial.print(boilTemp, 2);
+  Serial.print(" address=");
+  if (BoilTemp && BoilTemp->getDeviceCount() > 0) {
+    for (uint8_t i = 0; i < 8; i++) {
+      if (boilAddress[i] < 16) Serial.print('0');
+      Serial.print(boilAddress[i], HEX);
+    }
+  } else {
+    Serial.print("none");
+  }
+  Serial.println();
+
+  Serial.print("!hx711 DOUT=PH2/14 level=");
+  Serial.print((PINH & _BV(PH2)) ? 1 : 0);
+  Serial.print(" SCK=PH7/27 level=");
+  Serial.print((PINH & _BV(PH7)) ? 1 : 0);
+  Serial.print(" raw=");
+  Serial.print((long)massFast);
+  Serial.print(" valid=");
+  Serial.print(validMass ? 1 : 0);
+  Serial.print(" reported=");
+  Serial.print((long)massSensor);
+  Serial.print(" volume=");
+  Serial.println(waterVolume, 4);
+
+  Serial.print("!calibration toLiter=");
+  Serial.print(toLiter, 4);
+  Serial.print(" null=");
+  Serial.print(toLiterNull, 4);
+  Serial.print(" mashDelta=");
+  Serial.print(mashDelta, 4);
+  Serial.print(" boilDelta=");
+  Serial.println(boilDelta, 4);
+
+  Serial.print("!adc boardTemp=");
+  Serial.print(boardTemp, 2);
+  Serial.print(" inlet1=");
+  Serial.print(inlet1A, 2);
+  Serial.print(" inlet2=");
+  Serial.print(inlet2A, 2);
+  Serial.print(" boilPump=");
+  Serial.print(boilPumpA, 2);
+  Serial.print(" mashPump=");
+  Serial.println(mashPumpA, 2);
+  Serial.println("!------------------------------------");
+}
+#endif
 
 void setup() {
   Initialize_2560();
 }
 
 void loop() {
+#if BREWIE_DIAGNOSTICS
+  Diagnostics_Report();
+#endif
   if (powerOn) {
     Process_Sensors();
     brewie->Temperature_Control();
@@ -245,7 +349,7 @@ void Brewie_Status_Write() {
     }
   }
   brewieLength += sprintf(&statusMessage[brewieLength], "V%d\t", mcuVersion);
-  brewieLength += sprintf(&statusMessage[brewieLength], "%u\t", (uint16_t)massSensor);
+  brewieLength += sprintf(&statusMessage[brewieLength], "%ld\t", (long)massSensor);
   brewieLength += floatToStringAppend(&waterVolume, &statusMessage[brewieLength]);
   float floatTemp = mashTemp - mashDelta;
   brewieLength += floatToStringAppend(&floatTemp, &statusMessage[brewieLength]);
@@ -806,7 +910,7 @@ void Process_Sensors() {
   static uint32_t sensorTime = millis();
   static uint32_t sensorArray[5] = { 0, 0, 0, 0, 0 };
   static uint16_t samples = 0;
-  static uint32_t massAve = 0;
+  static int64_t massAve = 0;
   static uint8_t massSamp = 0;
   static uint32_t massTime = millis();
   static uint32_t peakTempLast = 0; 
@@ -933,12 +1037,27 @@ void Process_Sensors() {
     Serial.println("!Power brownout imminent!");
   }*/
 
-  // Pressure sensor seems to take > 100ms to take a reading
-  // Process I2C Weight/Pressure Sensors
+  // The B20 HX711 produces one signed 24-bit sample at approximately 10 SPS.
+  // Do not block the main control loop waiting for a disconnected sensor.
+#if BREWIE_USE_HX711
+  if (weightScale.wait_ready_timeout(1)) {
+    massFast = weightScale.read();
+    validMass = true;
+    massOffset = 0;
+    if (boilPump->pumpTach() < 5 && !boilPump->isRunning()) {
+      massAve += massFast;
+      massSamp++;
+    }
+  }
+#else
+  // B20+ pressure sensor seems to take >100ms to take a reading.
+  // Process I2C Weight/Pressure Sensors.
   if (millis() - massTime > 44) {
     massTime = millis();
 
-    uint8_t errorCode = PressureReadAll(&massFast, &massTemp, massAddress);
+    int16_t pressureRaw = 0;
+    uint8_t errorCode = PressureReadAll(&pressureRaw, &massTemp, massAddress);
+    massFast = pressureRaw;
     if (errorCode != 0) {
       massSensor = errorCode;
       TWIInit();
@@ -976,16 +1095,16 @@ void Process_Sensors() {
     }
 
     if (massSamp > 7) {
-      massSensor = (uint16_t)((float)massAve/(float)massSamp);
+      massSensor = (int32_t)(massAve/(int64_t)massSamp);
       if (fastWaterReadings) {
-        int16_t adjMass = (int16_t)massSensor - (int16_t)toLiterNull;
+        int32_t adjMass = massSensor - (int32_t)toLiterNull;
         if (adjMass < 0) {
           adjMass = 0;
         }
         waterVolume = (float)adjMass/toLiter;
       } else {
-        if (massSensor > ((uint16_t)toLiterNull)) {
-          massSensor -= (uint16_t)toLiterNull;
+        if (massSensor > (int32_t)toLiterNull) {
+          massSensor -= (int32_t)toLiterNull;
         } else {
           massSensor = 0;
         }
@@ -995,6 +1114,29 @@ void Process_Sensors() {
       massSamp = 0;
     }
   }
+#endif
+
+#if BREWIE_USE_HX711
+  if (massSamp > 7) {
+    massSensor = (int32_t)(massAve / (int64_t)massSamp);
+    if (fastWaterReadings) {
+      int32_t adjMass = massSensor - (int32_t)toLiterNull;
+      if (adjMass < 0) {
+        adjMass = 0;
+      }
+      waterVolume = (float)adjMass / toLiter;
+    } else {
+      if (massSensor > (int32_t)toLiterNull) {
+        massSensor -= (int32_t)toLiterNull;
+      } else {
+        massSensor = 0;
+      }
+      waterVolume = (float)massSensor / toLiter;
+    }
+    massAve = 0;
+    massSamp = 0;
+  }
+#endif
 }
 
 void Run_Sparge() {
@@ -1809,11 +1951,33 @@ void Initialize_2560() {
 
   TWIInit();
 
+#if BREWIE_USE_HX711
+  // B20: HX711 DOUT is PH2 (package pin 14), clock is PH7 (package pin 27).
+  // Use channel A, gain 128, matching the bogde/HX711 default.
+  weightScale.begin_port_h(2, 7, 128);
+#endif
+
   attachInterrupt(digitalPinToInterrupt(BOIL_PUMP_TACH), boilTachISR, FALLING);
   attachInterrupt(digitalPinToInterrupt(MASH_PUMP_TACH), mashTachISR, FALLING);
 
   MashTempPin = new OneWire(MASH_TEMP);
   BoilTempPin = new OneWire(BOIL_TEMP);
+
+  // Construct and initialize the DallasTemperature interfaces before the
+  // first Process_Temperature() call.  The original source only created
+  // these objects later in the error-recovery path, leaving the normal path
+  // with null pointers and no usable temperature readings.
+  MashTemp = new DallasTemperature(MashTempPin);
+  MashTemp->begin();
+  MashTemp->getAddress(mashAddress, 0);
+  MashTemp->setCheckForConversion(true);
+  MashTemp->setWaitForConversion(false);
+
+  BoilTemp = new DallasTemperature(BoilTempPin);
+  BoilTemp->begin();
+  BoilTemp->getAddress(boilAddress, 0);
+  BoilTemp->setCheckForConversion(true);
+  BoilTemp->setWaitForConversion(false);
 
   statusTime = millis();
 
@@ -1834,6 +1998,10 @@ void Initialize_2560() {
   //PORTJ = 0;
   DDRE |= 0x02;
   PORTE &= ~0x02;
+
+#if BREWIE_AUTO_POWER_ON
+  Power_On();
+#endif
 }
 
 void Close_All_Valves() {
@@ -1880,7 +2048,8 @@ void Brewie_Reset() {
 void Power_On() {
   digitalWrite(POWER_LIGHT, HIGH);
   if (!powerOn) {
-    PORTH |= 0x80;
+    // PH7 is reserved for the B20 HX711 clock; do not use the B20+ 12 V
+    // enable operation here.
     Brewie_Reset();
     delay(200);
     digitalWrite(PWR_EN_5V, HIGH);
@@ -1893,16 +2062,18 @@ void Power_On() {
     TIMSK5 |= _BV(TOIE5) + _BV(OCIE5C);
     DDRE &= ~0x02;
 
+#if !BREWIE_USE_HX711
     Serial.print("!Scanning I2C...");
     uint8_t iAddress = ScanTWI();
     Serial.println("done");
     if (iAddress > 1 && iAddress < 128) {
-      //massAddress = iAddress; 
+      //massAddress = iAddress;
       Serial.print("!Pressure sensor found at address: 0x");
       Serial.println(iAddress, HEX);
     } else {
       Serial.println("!Pressure sensor not found!");
     }
+#endif
   }
 }
 
@@ -1921,7 +2092,7 @@ void Power_Off() {
   digitalWrite(VENT_FAN, LOW);
   digitalWrite(POWER_FAN, LOW);
   digitalWrite(PWR_EN_SERVO, LOW);
-  PORTH &= ~0x80;
+  // PH7 is reserved for the B20 HX711 clock.
   digitalWrite(PWR_EN_ARM, LOW);
   digitalWrite(PWR_EN_5V, LOW);
   digitalWrite(POWER_LIGHT, LOW);
