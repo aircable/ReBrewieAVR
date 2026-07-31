@@ -418,11 +418,21 @@ void Brewie_Command_Decode() {
       } else if (commandNum == 27) {
         boilPump->setPumpSpeed(0);
       } else if (commandNum == 28) {
+#if BREWIE_HARDWARE_B20
+        // Original B20 protocol: direct cool-inlet actuator command.
+        digitalWrite(INLET_2, HIGH);
+#else
+        // B20+ behavior: P128 enters the automatic cooling controller.
         brewie->SetCooling();
         brewie->setTemperatures(-1.0, atof(&brewieData[brewieCommand[1][0]])/10.0);
+#endif
       } else if (commandNum == 29) {
+#if BREWIE_HARDWARE_B20
+        digitalWrite(INLET_2, LOW);
+#else
         brewie->setTemperatures(-1.0, 0);
         brewie->SetHeating();
+#endif
       } else if (commandNum == 12) {
         setValve(VALVE_MASH_IN, VALVE_OPEN);
       } else if (commandNum == 13) {
@@ -528,6 +538,16 @@ void Brewie_Command_Decode() {
           brewing = false;
           fastWaterReadings = false;
         }
+      }
+    } else if (brewieData[3] == '7') {
+      if (brewieData[4] == '9') {        // Reset water-level zero point (P79)
+        // The legacy application sends P79 without arguments. Use the
+        // current signed HX711 reading as the empty-tank reference so the
+        // calculated volume becomes zero without altering the raw report.
+#if BREWIE_USE_HX711
+        toLiterNull = (float)massSensor;
+        waterVolume = 0.0;
+#endif
       }
     } else if (brewieData[3] == '8') {
       // Load calibration constants to MCU
@@ -697,7 +717,9 @@ void Process_Step() {
     case 9: // Might not exist
       break;
     case 10: // Cool Step/Unclogging step
+#if !BREWIE_HARDWARE_B20
       brewie->SetCooling();
+#endif
       break;
     default: 
       break;
@@ -1119,20 +1141,12 @@ void Process_Sensors() {
 #if BREWIE_USE_HX711
   if (massSamp > 7) {
     massSensor = (int32_t)(massAve / (int64_t)massSamp);
-    if (fastWaterReadings) {
-      int32_t adjMass = massSensor - (int32_t)toLiterNull;
-      if (adjMass < 0) {
-        adjMass = 0;
-      }
-      waterVolume = (float)adjMass / toLiter;
-    } else {
-      if (massSensor > (int32_t)toLiterNull) {
-        massSensor -= (int32_t)toLiterNull;
-      } else {
-        massSensor = 0;
-      }
-      waterVolume = (float)massSensor / toLiter;
-    }
+    // The original B20 firmware reports the signed HX711 reading in the
+    // status frame, including a negative empty-tank value.  Apply the null
+    // point only to the calculated volume; do not clamp or modify massSensor.
+    // This reproduces, for example, -288253 / 18996.1 = -15.174326 liters.
+    int32_t adjMass = massSensor - (int32_t)toLiterNull;
+    waterVolume = (float)adjMass / toLiter;
     massAve = 0;
     massSamp = 0;
   }
@@ -1576,7 +1590,7 @@ void Safety_Check() {
         digitalWrite(DRAIN_LIGHT, LOW);
       }
     } else {
-      digitalWrite(POWER_LIGHT, LOW);
+      digitalWrite(POWER_LIGHT, powerOn ? HIGH : LOW);
       digitalWrite(DRAIN_LIGHT, LOW);
     }
   } else {
@@ -1912,6 +1926,19 @@ void Initialize_2560() {
   pinMode(LED1, OUTPUT);
   pinMode(INLET_1, OUTPUT);
   pinMode(INLET_2, OUTPUT);
+  // Explicitly clear the output latches after the board-wide pull-up setup;
+  // pinMode(OUTPUT) otherwise preserves a previously latched high state.
+  digitalWrite(VENT_FAN, LOW);
+  digitalWrite(POWER_FAN, LOW);
+  digitalWrite(INLET_1, LOW);
+  digitalWrite(INLET_2, LOW);
+#if BREWIE_HARDWARE_B20
+  // B20 valve outputs use PJ0/PJ1 and PJ4/PJ5; PJ2 is the converter enable.
+  // The generic unused-pin setup leaves these pins as inputs, so explicitly
+  // claim all of them here and clear their output latches.
+  DDRJ |= 0x37;
+  PORTJ &= (uint8_t)~0x37;
+#endif
 
   // SPI for DAC
   pinMode(SPEED_CTRL_SCLK, OUTPUT);
@@ -1923,8 +1950,13 @@ void Initialize_2560() {
   pinMode(50, INPUT);   //MISO, DAC doesn't send any data though
   pinMode(53, OUTPUT);  //Main ~CS, needs to be output for SPI to work
 
+#if BREWIE_HARDWARE_B20
+  B20_VALVE_POWER_DDR |= _BV(B20_VALVE_POWER_BIT);
+  B20_VALVE_POWER_PORT &= (uint8_t)~_BV(B20_VALVE_POWER_BIT);
+#else
   pinMode(PWR_EN_SERVO, OUTPUT);
   digitalWrite(PWR_EN_SERVO, LOW);
+#endif
   
   // Power Enable 12V
   //DDRH |= 0x80;
@@ -1953,8 +1985,9 @@ void Initialize_2560() {
 
 #if BREWIE_USE_HX711
   // B20: HX711 DOUT is PH2 (package pin 14), clock is PH7 (package pin 27).
-  // Use channel A, gain 128, matching the bogde/HX711 default.
-  weightScale.begin_port_h(2, 7, 128);
+  // The original B20 calibration factor is consistent with channel A,
+  // gain 64.  Gain 128 produces approximately twice the counts per liter.
+  weightScale.begin_port_h(2, 7, 64);
 #endif
 
   attachInterrupt(digitalPinToInterrupt(BOIL_PUMP_TACH), boilTachISR, FALLING);
@@ -2058,6 +2091,13 @@ void Power_On() {
     digitalWrite(PWR_EN_ARM, HIGH);
     delay(500);
     Close_All_Valves();
+    // Development test: keep the suspected B20 valve-converter enable on so
+    // it can be measured after startup and while testing individual valves.
+#if BREWIE_HARDWARE_B20
+    B20_VALVE_POWER_PORT |= _BV(B20_VALVE_POWER_BIT);
+#else
+    digitalWrite(PWR_EN_SERVO, HIGH);
+#endif
     powerOn = true;
     TIMSK5 |= _BV(TOIE5) + _BV(OCIE5C);
     DDRE &= ~0x02;
@@ -2091,7 +2131,11 @@ void Power_Off() {
   setValve(VALVE_BOIL_RET, VALVE_OPEN);
   digitalWrite(VENT_FAN, LOW);
   digitalWrite(POWER_FAN, LOW);
+#if BREWIE_HARDWARE_B20
+  B20_VALVE_POWER_PORT &= (uint8_t)~_BV(B20_VALVE_POWER_BIT);
+#else
   digitalWrite(PWR_EN_SERVO, LOW);
+#endif
   // PH7 is reserved for the B20 HX711 clock.
   digitalWrite(PWR_EN_ARM, LOW);
   digitalWrite(PWR_EN_5V, LOW);
