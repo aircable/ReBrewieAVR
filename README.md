@@ -10,6 +10,14 @@ The source supports both controller variants through
 // #define BREWIE_HARDWARE_B20 0 // B20+: I2C pressure sensor
 ```
 
+The flag selects the complete controller hardware profile, including sensor
+interfaces, AVR pins, actuators, current channels, and cooling behavior. See
+[B20hardware.md](B20hardware.md) for the detailed B20 pin and command map and
+the differences from B20+.
+
+The corresponding B20+ hardware map is documented in
+[B20+hardware.md](B20+hardware.md).
+
 Bring-up diagnostics and automatic power-on are disabled by default. They
 can be enabled temporarily in `ReBrewie.ino` with
 `BREWIE_DIAGNOSTICS` and `BREWIE_AUTO_POWER_ON`.
