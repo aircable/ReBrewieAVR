@@ -32,7 +32,9 @@ uses the pressure-sensor interface and retains the B20+ cooling behavior.
 
 Bring-up diagnostics and automatic power-on are disabled by default. They are
 controlled by the `BREWIE_DIAGNOSTICS` and `BREWIE_AUTO_POWER_ON` definitions
-in `ReBrewie.ino`.
+in `ReBrewie.ino`. `BREWIE_CLOSE_VALVES_ON_BOOT` is enabled by default and
+actively homes every valve to its closed position after an AVR reset. This
+safe startup pass does not power on the controller or enter the AC/E210 path.
 
 ## Firmware architecture
 

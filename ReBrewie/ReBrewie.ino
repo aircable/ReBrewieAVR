@@ -27,6 +27,13 @@
 #define BREWIE_AUTO_POWER_ON 0
 #endif
 
+// Establish a known hydraulic state whenever the AVR boots.  This is kept
+// separate from BREWIE_AUTO_POWER_ON so valve homing does not enable the ARM
+// rail, start sensor/control processing, or exercise the AC/E210 power path.
+#ifndef BREWIE_CLOSE_VALVES_ON_BOOT
+#define BREWIE_CLOSE_VALVES_ON_BOOT 1
+#endif
+
 // Global Configurations
 uint8_t spargePumpSpeed = 100;      // Reduce sparging pumping speed
 
@@ -2031,6 +2038,10 @@ void Initialize_2560() {
   //PORTJ = 0;
   DDRE |= 0x02;
   PORTE &= ~0x02;
+
+#if BREWIE_CLOSE_VALVES_ON_BOOT
+  Close_All_Valves();
+#endif
 
 #if BREWIE_AUTO_POWER_ON
   Power_On();
